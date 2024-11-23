@@ -1,0 +1,11 @@
+services:
+  webapp:
+    build: .
+    env_file:
+      - /home/isucon/env.sh
+    network_mode: host
+    command: ["/home/isucon/webapp/rust/target/release/isucondition"]
+    volumes:
+      - /home/isucon/webapp:/home/isucon/webapp
+    working_dir: /home/isucon/webapp/rust
+    init: true

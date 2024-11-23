@@ -1,0 +1,41 @@
+- name: Create target directory if it doesn't exist
+  ansible.builtin.file:
+    path: /home/isucon/webapp/rust/target/release
+    state: directory
+    mode: "0755"
+    owner: isucon
+    group: isucon
+
+
+- name: Copy isucondition binary
+  ansible.builtin.copy:
+    src: "../webapp/{{ item }}"
+    dest: "/home/isucon/webapp/{{ item }}"
+    mode: "0755"
+    owner: isucon
+    group: isucon
+  with_items:
+    - rust/target/release/isucondition
+    - rust/Dockerfile
+    - rust/docker-compose.yaml
+  notify: restart_webapp
+
+
+- name: Set up isucondition.rust.service override
+  community.general.ini_file:
+    dest: /etc/systemd/system/isucondition.rust.service
+    owner: root
+    group: root
+    mode: "0644"
+    section: Service
+    option: "{{item.0}}"
+    value: "{{item.1}}"
+  loop:
+    - ["ExecStart", "docker compose -f docker-compose.yaml up --build --remove-orphans"]
+    - ["ExecStop", "docker compose -f docker-compose.yaml down"]
+  notify: restart_webapp
+
+- name: Stop isucondition.go service
+  ansible.builtin.systemd:
+    name: isucondition.go
+    state: stopped

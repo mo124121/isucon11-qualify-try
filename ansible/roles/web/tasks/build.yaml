@@ -1,0 +1,4 @@
+- name: Build isupipe in release mode
+  ansible.builtin.command: cargo build --release
+  args:
+    chdir: ../webapp/rust
