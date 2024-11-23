@@ -7,6 +7,8 @@ use futures::StreamExt as _;
 use futures::TryStreamExt as _;
 use std::collections::{HashMap, HashSet};
 
+pub mod utils;
+
 const SESSION_NAME: &str = "isucondition_rust";
 const CONDITION_LIMIT: usize = 20;
 const FRONTEND_CONTENTS_PATH: &str = "../public";
@@ -499,6 +501,18 @@ async fn post_initialize(
     .execute(pool.as_ref())
     .await
     .map_err(SqlxError)?;
+
+    //DBのインデックス
+    let index_sqls = vec![
+        "CREATE INDEX uuid_time_idx ON isu_condition (jia_isu_uuid, timestamp DESC);",
+        "CREATE INDEX character_idx ON isu (`character`);",
+    ];
+    for sql in &index_sqls {
+        if let Err(err) = utils::db::create_index_if_not_exists(&pool, sql).await {
+            log::error!("failed to add index error: {}", err);
+            return Ok(HttpResponse::InternalServerError().into());
+        }
+    }
 
     // 測定開始
     let client = reqwest::Client::new();
