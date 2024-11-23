@@ -237,7 +237,7 @@ async fn main() -> std::io::Result<()> {
 
     let pool = sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(10)
-        .after_connect(|conn| {
+        .after_connect(|conn, _meta| {
             Box::pin(async move {
                 use sqlx::Executor as _;
                 // DB のタイムゾーンを JST に強制する
@@ -646,7 +646,7 @@ async fn post_isu(
     let mut image = None;
     while let Some(field) = payload.next().await {
         let field = field.map_err(|_| actix_web::error::ErrorBadRequest("bad format: icon"))?;
-        let content_disposition = field.content_disposition().unwrap();
+        let content_disposition = field.content_disposition().clone();
         let content = field
             .map_ok(|chunk| bytes::BytesMut::from(&chunk[..]))
             .try_concat()
