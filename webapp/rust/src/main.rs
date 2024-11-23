@@ -301,6 +301,7 @@ async fn main() -> std::io::Result<()> {
                 "/assets",
                 std::path::Path::new(FRONTEND_CONTENTS_PATH).join("assets"),
             ))
+            .configure(pprof_integration::frameworks::actix_web::configure)
     });
     let server = if let Some(l) = listenfd::ListenFd::from_env().take_tcp_listener(0)? {
         server.listen(l)?
@@ -498,6 +499,13 @@ async fn post_initialize(
     .execute(pool.as_ref())
     .await
     .map_err(SqlxError)?;
+
+    // 測定開始
+    let client = reqwest::Client::new();
+    let _res = client
+        .get("http://isucon-o11y:9000/api/group/collect")
+        .send()
+        .await;
     Ok(HttpResponse::Ok().json(InitializeResponse {
         language: "rust".to_owned(),
     }))
