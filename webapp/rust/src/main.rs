@@ -1,11 +1,17 @@
+#![allow(deprecated)]
+#![allow(unused_variables)]
 use actix_web::{web, HttpResponse};
 use chrono::DurationRound as _;
 use chrono::Offset as _;
 use chrono::TimeZone as _;
+use chrono::Utc;
 use chrono::{DateTime, NaiveDateTime};
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
+use sqlx::mysql::MySqlConnection;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 
 pub mod utils;
 
@@ -22,6 +28,9 @@ const CONDITION_LEVEL_CRITICAL: &str = "critical";
 const SCORE_CONDITION_LEVEL_INFO: i64 = 3;
 const SCORE_CONDITION_LEVEL_WARNING: i64 = 2;
 const SCORE_CONDITION_LEVEL_CRITICAL: i64 = 1;
+
+static COND_CACHE: LazyLock<Mutex<HashMap<String, Option<IsuCondition>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static::lazy_static! {
     static ref JIA_JWT_SIGNING_KEY_PEM: Vec<u8> = std::fs::read(JIA_JWT_SIGNING_KEY_PATH).expect("failed to read JIA JWT signing key file");
@@ -90,7 +99,7 @@ struct GetIsuListResponse {
     latest_isu_condition: Option<GetIsuConditionResponse>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct IsuCondition {
     id: i64,
     jia_isu_uuid: String,
@@ -512,6 +521,12 @@ async fn post_initialize(
             log::error!("failed to add index error: {}", err);
             return Ok(HttpResponse::InternalServerError().into());
         }
+    }
+
+    // cache clear
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.clear();
     }
 
     // 測定開始
@@ -1254,6 +1269,29 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
     Ok(HttpResponse::Ok().json(res))
 }
 
+async fn get_condition(
+    conn: &mut MySqlConnection,
+    uuid: &String,
+) -> sqlx::Result<Option<IsuCondition>> {
+    {
+        let cache = COND_CACHE.lock().await;
+        if let Some(item) = cache.get(uuid) {
+            return Ok(item.clone());
+        }
+    }
+    let item: Option<IsuCondition> = sqlx::query_as(
+        "SELECT * FROM isu_condition WHERE jia_isu_uuid = ? ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(uuid)
+    .fetch_optional(&mut *conn)
+    .await?;
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.insert(uuid.clone(), item.clone());
+    }
+    Ok(item)
+}
+
 // ISUからのコンディションを受け取る
 #[actix_web::post("/api/condition/{jia_isu_uuid}")]
 async fn post_isu_condition(
@@ -1262,7 +1300,7 @@ async fn post_isu_condition(
     req: web::Json<Vec<PostIsuConditionRequest>>,
 ) -> actix_web::Result<HttpResponse> {
     // TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-    const DROP_PROBABILITY: f64 = 0.9;
+    const DROP_PROBABILITY: f64 = 0.5;
     if rand::random::<f64>() <= DROP_PROBABILITY {
         log::warn!("drop post isu condition request");
         return Ok(HttpResponse::Accepted().finish());
@@ -1295,16 +1333,53 @@ async fn post_isu_condition(
             return Err(actix_web::error::ErrorBadRequest("bad request body"));
         }
 
-        sqlx::query(
-            "INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) VALUES (?, ?, ?, ?, ?)",
+        let last_cond = get_condition(&mut *tx, &jia_isu_uuid)
+            .await
+            .map_err(SqlxError)?;
+
+        let flag = match last_cond {
+            Some(last_cond)
+                if last_cond
+                    .timestamp
+                    .duration_trunc(chrono::Duration::hours(1))
+                    == timestamp.duration_trunc(chrono::Duration::hours(1)) =>
+            {
+                true
+            }
+            _ => false,
+        };
+
+        if !flag {
+            continue;
+        }
+        let created_at = DateTime::from_utc(Utc::now().naive_utc(), JST_OFFSET.fix());
+
+        let rs = sqlx::query(
+            "INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `created_at`) VALUES (?, ?, ?, ?, ?, ?)",
         )
             .bind(jia_isu_uuid.as_ref())
             .bind(&timestamp.naive_local())
             .bind(&cond.is_sitting)
             .bind(&cond.condition)
             .bind(&cond.message)
+            .bind(&created_at.naive_local())
             .execute(&mut tx)
             .await.map_err(SqlxError)?;
+        {
+            let mut cache = COND_CACHE.lock().await;
+            cache.insert(
+                jia_isu_uuid.as_ref().clone(),
+                Some(IsuCondition {
+                    id: rs.last_insert_id() as i64,
+                    jia_isu_uuid: jia_isu_uuid.as_ref().clone(),
+                    is_sitting: cond.is_sitting,
+                    condition: cond.condition.clone(),
+                    message: cond.message.clone(),
+                    timestamp,
+                    created_at,
+                }),
+            );
+        }
     }
 
     tx.commit().await.map_err(SqlxError)?;
