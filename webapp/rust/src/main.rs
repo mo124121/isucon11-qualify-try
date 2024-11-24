@@ -5,11 +5,15 @@ use actix_web::{web, HttpResponse};
 use chrono::DurationRound as _;
 use chrono::Offset as _;
 use chrono::TimeZone as _;
+use chrono::Utc;
 use chrono::{DateTime, NaiveDateTime};
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
+use sqlx::mysql::MySqlConnection;
 use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 
 pub mod utils;
 
@@ -26,6 +30,9 @@ const CONDITION_LEVEL_CRITICAL: &str = "critical";
 const SCORE_CONDITION_LEVEL_INFO: i64 = 3;
 const SCORE_CONDITION_LEVEL_WARNING: i64 = 2;
 const SCORE_CONDITION_LEVEL_CRITICAL: i64 = 1;
+
+static COND_CACHE: LazyLock<Mutex<HashMap<String, Option<IsuCondition>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static::lazy_static! {
     static ref JIA_JWT_SIGNING_KEY_PEM: Vec<u8> = std::fs::read(JIA_JWT_SIGNING_KEY_PATH).expect("failed to read JIA JWT signing key file");
@@ -94,7 +101,7 @@ struct GetIsuListResponse {
     latest_isu_condition: Option<GetIsuConditionResponse>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct IsuCondition {
     id: i64,
     jia_isu_uuid: String,
@@ -516,6 +523,12 @@ async fn post_initialize(
             log::error!("failed to add index error: {}", err);
             return Ok(HttpResponse::InternalServerError().into());
         }
+    }
+
+    // cache clear
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.clear();
     }
 
     // 測定開始
@@ -1255,6 +1268,29 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
     }
 
     Ok(HttpResponse::Ok().json(res))
+}
+
+async fn get_condition(
+    conn: &mut MySqlConnection,
+    uuid: &String,
+) -> sqlx::Result<Option<IsuCondition>> {
+    {
+        let cache = COND_CACHE.lock().await;
+        if let Some(item) = cache.get(uuid) {
+            return Ok(item.clone());
+        }
+    }
+    let item: Option<IsuCondition> = sqlx::query_as(
+        "SELECT * FROM isu_condition WHERE jia_isu_uuid = ? ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(uuid)
+    .fetch_optional(&mut *conn)
+    .await?;
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.insert(uuid.clone(), item.clone());
+    }
+    Ok(item)
 }
 
 // ISUからのコンディションを受け取る
