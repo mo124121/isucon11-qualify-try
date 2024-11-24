@@ -1278,14 +1278,14 @@ async fn post_isu_condition(
 
     let mut tx = pool.begin().await.map_err(SqlxError)?;
 
-    let count: i64 = fetch_one_scalar(
-        sqlx::query_scalar("SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?")
+    let exists: bool = fetch_one_scalar(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM `isu` WHERE `jia_isu_uuid` = ?)")
             .bind(jia_isu_uuid.as_ref()),
         &mut tx,
     )
     .await
     .map_err(SqlxError)?;
-    if count == 0 {
+    if !exists {
         return Err(actix_web::error::ErrorNotFound("not found: isu"));
     }
 
