@@ -1204,18 +1204,19 @@ fn calculate_condition_level(condition: &str) -> Option<&'static str> {
 #[actix_web::get("/api/trend")]
 async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpResponse> {
     // すべての必要なデータを一括取得
-    let all_isu_data: Vec<Isu> = sqlx::query_as("SELECT * FROM `isu`")
-        .fetch_all(pool.as_ref())
-        .await
-        .map_err(SqlxError)?;
+    let all_isu_data: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT `id`, `jia_isu_uuid`, `character` FROM `isu`")
+            .fetch_all(pool.as_ref())
+            .await
+            .map_err(SqlxError)?;
 
     // character ごとにグループ化
-    let mut isu_map: HashMap<String, Vec<Isu>> = HashMap::new();
-    for isu in all_isu_data {
+    let mut isu_map: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (id, jia_isu_uuid, character) in all_isu_data {
         isu_map
-            .entry(isu.character.clone())
+            .entry(character)
             .or_insert_with(Vec::new)
-            .push(isu);
+            .push((id, jia_isu_uuid));
     }
 
     let mut res = Vec::new();
@@ -1226,8 +1227,8 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
         let mut character_warning_isu_conditions = Vec::new();
         let mut character_critical_isu_conditions = Vec::new();
 
-        for isu in isu_list {
-            let condition = get_condition(&mut conn, &isu.jia_isu_uuid)
+        for (id, jia_isu_uuid) in isu_list {
+            let condition = get_condition(&mut conn, &jia_isu_uuid)
                 .await
                 .map_err(SqlxError)?;
 
@@ -1240,7 +1241,7 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
                 }
                 let condition_level = condition_level.unwrap();
                 let trend_condition = TrendCondition {
-                    id: isu.id,
+                    id,
                     timestamp: isu_last_condition.timestamp.timestamp(),
                 };
                 match condition_level {
@@ -1303,7 +1304,7 @@ async fn post_isu_condition(
     req: web::Json<Vec<PostIsuConditionRequest>>,
 ) -> actix_web::Result<HttpResponse> {
     // TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-    const DROP_PROBABILITY: f64 = 0.5;
+    const DROP_PROBABILITY: f64 = 0.9;
     if rand::random::<f64>() <= DROP_PROBABILITY {
         log::warn!("drop post isu condition request");
         return Ok(HttpResponse::Accepted().finish());
@@ -1339,11 +1340,6 @@ async fn post_isu_condition(
             .push_bind(&cond.message);
     });
 
-    {
-        let mut cache = COND_CACHE.lock().await;
-        cache.remove(jia_isu_uuid.as_ref());
-    }
-
     query_builder
         .build()
         .execute(&mut *tx)
@@ -1351,6 +1347,11 @@ async fn post_isu_condition(
         .map_err(SqlxError)?;
 
     tx.commit().await.map_err(SqlxError)?;
+
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.remove(jia_isu_uuid.as_ref());
+    }
 
     Ok(HttpResponse::Accepted().finish())
 }
