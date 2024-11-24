@@ -1,3 +1,6 @@
+#![allow(deprecated)]
+#![allow(dead_code)]
+
 use actix_web::{web, HttpResponse};
 use chrono::DurationRound as _;
 use chrono::Offset as _;
@@ -5,6 +8,7 @@ use chrono::TimeZone as _;
 use chrono::{DateTime, NaiveDateTime};
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
+use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
 
 pub mod utils;
@@ -1285,27 +1289,24 @@ async fn post_isu_condition(
         return Err(actix_web::error::ErrorNotFound("not found: isu"));
     }
 
-    for cond in req.iter() {
-        let timestamp: DateTime<chrono::FixedOffset> = DateTime::from_utc(
-            NaiveDateTime::from_timestamp(cond.timestamp, 0),
-            JST_OFFSET.fix(),
-        );
+    let mut query_builder:QueryBuilder<sqlx::MySql> = QueryBuilder::new("INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)");
+    query_builder.push_values(req.iter(), |mut b, cond| {
+        let naive_timestamp = NaiveDateTime::from_timestamp(cond.timestamp, 0);
+        let timestamp: DateTime<chrono::FixedOffset> =
+            DateTime::from_utc(naive_timestamp, JST_OFFSET.fix());
 
-        if !is_valid_condition_format(&cond.condition) {
-            return Err(actix_web::error::ErrorBadRequest("bad request body"));
-        }
+        b.push_bind(jia_isu_uuid.as_ref())
+            .push_bind(timestamp.naive_local())
+            .push_bind(&cond.is_sitting)
+            .push_bind(&cond.condition)
+            .push_bind(&cond.message);
+    });
 
-        sqlx::query(
-            "INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) VALUES (?, ?, ?, ?, ?)",
-        )
-            .bind(jia_isu_uuid.as_ref())
-            .bind(&timestamp.naive_local())
-            .bind(&cond.is_sitting)
-            .bind(&cond.condition)
-            .bind(&cond.message)
-            .execute(&mut tx)
-            .await.map_err(SqlxError)?;
-    }
+    query_builder
+        .build()
+        .execute(&mut *tx)
+        .await
+        .map_err(SqlxError)?;
 
     tx.commit().await.map_err(SqlxError)?;
 
