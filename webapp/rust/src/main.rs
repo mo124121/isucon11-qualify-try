@@ -1152,18 +1152,20 @@ async fn get_isu_conditions_from_db(
 ) -> sqlx::Result<Vec<GetIsuConditionResponse>> {
     let conditions: Vec<IsuCondition> = if let Some(ref start_time) = start_time {
         sqlx::query_as(
-            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ?	AND ? <= `timestamp` ORDER BY `timestamp` DESC",
+            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ?	AND ? <= `timestamp` ORDER BY `timestamp` DESC LIMIT ?",
         )
             .bind(jia_isu_uuid)
             .bind(end_time.naive_local())
             .bind(start_time.naive_local())
+            .bind(limit as i64)
             .fetch_all(pool)
     } else {
         sqlx::query_as(
-            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ? ORDER BY `timestamp` DESC",
+            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ? ORDER BY `timestamp` DESC LIMIT ?",
         )
         .bind(jia_isu_uuid)
         .bind(end_time.naive_local())
+        .bind(limit as i64)
         .fetch_all(pool)
     }.await?;
 
@@ -1182,10 +1184,6 @@ async fn get_isu_conditions_from_db(
                 });
             }
         }
-    }
-
-    if conditions_response.len() > limit {
-        conditions_response.truncate(limit);
     }
 
     Ok(conditions_response)
