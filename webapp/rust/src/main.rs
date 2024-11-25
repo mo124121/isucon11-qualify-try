@@ -8,8 +8,11 @@ use chrono::TimeZone as _;
 use chrono::{DateTime, NaiveDateTime};
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
+use sqlx::mysql::MySqlConnection;
 use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 
 pub mod utils;
 
@@ -26,6 +29,9 @@ const CONDITION_LEVEL_CRITICAL: &str = "critical";
 const SCORE_CONDITION_LEVEL_INFO: i64 = 3;
 const SCORE_CONDITION_LEVEL_WARNING: i64 = 2;
 const SCORE_CONDITION_LEVEL_CRITICAL: i64 = 1;
+
+static COND_CACHE: LazyLock<Mutex<HashMap<String, Option<IsuCondition>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 lazy_static::lazy_static! {
     static ref JIA_JWT_SIGNING_KEY_PEM: Vec<u8> = std::fs::read(JIA_JWT_SIGNING_KEY_PATH).expect("failed to read JIA JWT signing key file");
@@ -94,7 +100,7 @@ struct GetIsuListResponse {
     latest_isu_condition: Option<GetIsuConditionResponse>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct IsuCondition {
     id: i64,
     jia_isu_uuid: String,
@@ -539,6 +545,12 @@ async fn post_initialize(
             log::error!("failed to add index error: {}", err);
             return Ok(HttpResponse::InternalServerError().into());
         }
+    }
+
+    // cache clear
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.clear();
     }
 
     // 測定開始
@@ -1209,34 +1221,37 @@ fn calculate_condition_level(condition: &str) -> Option<&'static str> {
 // ISUの性格毎の最新のコンディション情報
 #[actix_web::get("/api/trend")]
 async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpResponse> {
-    let character_list: Vec<String> = sqlx::query_scalar("SELECT DISTINCT `character` FROM `isu`")
-        .fetch_all(pool.as_ref())
-        .await
-        .map_err(SqlxError)?;
-
-    let mut res = Vec::new();
-
-    for character in character_list {
-        let isu_list: Vec<Isu> = sqlx::query_as("SELECT * FROM `isu` WHERE `character` = ?")
-            .bind(&character)
+    // すべての必要なデータを一括取得
+    let all_isu_data: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT `id`, `jia_isu_uuid`, `character` FROM `isu`")
             .fetch_all(pool.as_ref())
             .await
             .map_err(SqlxError)?;
 
+    // character ごとにグループ化
+    let mut isu_map: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (id, jia_isu_uuid, character) in all_isu_data {
+        isu_map
+            .entry(character)
+            .or_insert_with(Vec::new)
+            .push((id, jia_isu_uuid));
+    }
+
+    let mut res = Vec::new();
+    let mut conn = pool.acquire().await.map_err(SqlxError)?;
+
+    for (character, isu_list) in isu_map {
         let mut character_info_isu_conditions = Vec::new();
         let mut character_warning_isu_conditions = Vec::new();
         let mut character_critical_isu_conditions = Vec::new();
-        for isu in isu_list {
-            let conditions: Vec<IsuCondition> = sqlx::query_as(
-                "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC",
-            )
-            .bind(&isu.jia_isu_uuid)
-            .fetch_all(pool.as_ref())
-            .await
-            .map_err(SqlxError)?;
 
-            if !conditions.is_empty() {
-                let isu_last_condition = &conditions[0];
+        for (id, jia_isu_uuid) in isu_list {
+            let condition = get_condition(&mut conn, &jia_isu_uuid)
+                .await
+                .map_err(SqlxError)?;
+
+            if condition.is_some() {
+                let isu_last_condition = condition.unwrap();
                 let condition_level = calculate_condition_level(&isu_last_condition.condition);
                 if condition_level.is_none() {
                     log::error!("unexpected warn count");
@@ -1244,7 +1259,7 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
                 }
                 let condition_level = condition_level.unwrap();
                 let trend_condition = TrendCondition {
-                    id: isu.id,
+                    id,
                     timestamp: isu_last_condition.timestamp.timestamp(),
                 };
                 match condition_level {
@@ -1256,12 +1271,15 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
             }
         }
 
+        // ソート（降順）
         character_info_isu_conditions
             .sort_by_key(|condition| std::cmp::Reverse(condition.timestamp));
         character_warning_isu_conditions
             .sort_by_key(|condition| std::cmp::Reverse(condition.timestamp));
         character_critical_isu_conditions
             .sort_by_key(|condition| std::cmp::Reverse(condition.timestamp));
+
+        // 結果をレスポンス用に追加
         res.push(TrendResponse {
             character,
             info: character_info_isu_conditions,
@@ -1271,6 +1289,29 @@ async fn get_trend(pool: web::Data<sqlx::MySqlPool>) -> actix_web::Result<HttpRe
     }
 
     Ok(HttpResponse::Ok().json(res))
+}
+
+async fn get_condition(
+    conn: &mut MySqlConnection,
+    uuid: &String,
+) -> sqlx::Result<Option<IsuCondition>> {
+    {
+        let cache = COND_CACHE.lock().await;
+        if let Some(item) = cache.get(uuid) {
+            return Ok(item.clone());
+        }
+    }
+    let item: Option<IsuCondition> = sqlx::query_as(
+        "SELECT * FROM isu_condition WHERE jia_isu_uuid = ? ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(uuid)
+    .fetch_optional(&mut *conn)
+    .await?;
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.insert(uuid.clone(), item.clone());
+    }
+    Ok(item)
 }
 
 // ISUからのコンディションを受け取る
@@ -1325,6 +1366,11 @@ async fn post_isu_condition(
         .map_err(SqlxError)?;
 
     tx.commit().await.map_err(SqlxError)?;
+
+    {
+        let mut cache = COND_CACHE.lock().await;
+        cache.remove(jia_isu_uuid.as_ref());
+    }
 
     Ok(HttpResponse::Accepted().finish())
 }
