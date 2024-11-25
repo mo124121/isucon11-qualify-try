@@ -109,6 +109,7 @@ struct IsuCondition {
     condition: String,
     message: String,
     created_at: DateTime<chrono::FixedOffset>,
+    level: String,
 }
 impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for IsuCondition {
     fn from_row(row: &sqlx::mysql::MySqlRow) -> sqlx::Result<Self> {
@@ -127,6 +128,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for IsuCondition {
             condition: row.try_get("condition")?,
             message: row.try_get("message")?,
             created_at,
+            level: row.try_get("level")?,
         })
     }
 }
@@ -511,6 +513,27 @@ async fn post_initialize(
     .execute(pool.as_ref())
     .await
     .map_err(SqlxError)?;
+
+    //add column
+    sqlx::query("ALTER TABLE isu_condition ADD level VARCHAR(255) DEFAULT ''")
+        .execute(pool.as_ref())
+        .await
+        .map_err(SqlxError)?;
+
+    let conditions: Vec<IsuCondition> = sqlx::query_as("SELECT * FROM isu_condition")
+        .fetch_all(pool.as_ref())
+        .await
+        .map_err(SqlxError)?;
+
+    for condition in conditions {
+        let level = calculate_condition_level(&condition.condition).unwrap();
+        sqlx::query("UPDATE isu_condition SET level = ? WHERE id = ?")
+            .bind(level)
+            .bind(condition.id)
+            .execute(pool.as_ref())
+            .await
+            .map_err(SqlxError)?;
+    }
 
     //DBのインデックス
     let index_sqls = vec![
@@ -1095,10 +1118,7 @@ async fn get_isu_conditions(
             "missing: condition_level",
         ));
     }
-    let mut condition_level = HashSet::new();
-    for level in query.condition_level.as_ref().unwrap().split(',') {
-        condition_level.insert(level);
-    }
+    let target_level = query.condition_level.as_ref().unwrap();
 
     let start_time = match &query.start_time {
         Some(start_time_str) => match start_time_str.parse() {
@@ -1130,7 +1150,7 @@ async fn get_isu_conditions(
         &pool,
         &jia_isu_uuid,
         end_time,
-        &condition_level,
+        target_level,
         &start_time,
         CONDITION_LIMIT,
         &isu_name,
@@ -1145,45 +1165,43 @@ async fn get_isu_conditions_from_db(
     pool: &sqlx::MySqlPool,
     jia_isu_uuid: &str,
     end_time: DateTime<chrono::FixedOffset>,
-    condition_level: &HashSet<&str>,
+    target_level: &String,
     start_time: &Option<DateTime<chrono::FixedOffset>>,
     limit: usize,
     isu_name: &str,
 ) -> sqlx::Result<Vec<GetIsuConditionResponse>> {
     let conditions: Vec<IsuCondition> = if let Some(ref start_time) = start_time {
         sqlx::query_as(
-            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ?	AND ? <= `timestamp` ORDER BY `timestamp` DESC LIMIT ?",
+            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ? AND ? <= `timestamp` AND ? LIKE CONCAT('%', level ,'%') ORDER BY `timestamp` DESC LIMIT ?",
         )
             .bind(jia_isu_uuid)
             .bind(end_time.naive_local())
             .bind(start_time.naive_local())
+            .bind(target_level)
             .bind(limit as i64)
             .fetch_all(pool)
     } else {
         sqlx::query_as(
-            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ? ORDER BY `timestamp` DESC LIMIT ?",
+            "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND `timestamp` < ? AND ? LIKE CONCAT('%', level ,'%') ORDER BY `timestamp` DESC LIMIT ?",
         )
         .bind(jia_isu_uuid)
         .bind(end_time.naive_local())
+        .bind(target_level)
         .bind(limit as i64)
         .fetch_all(pool)
     }.await?;
 
     let mut conditions_response = Vec::new();
     for c in conditions {
-        if let Some(c_level) = calculate_condition_level(&c.condition) {
-            if condition_level.contains(c_level) {
-                conditions_response.push(GetIsuConditionResponse {
-                    jia_isu_uuid: c.jia_isu_uuid,
-                    isu_name: isu_name.to_owned(),
-                    timestamp: c.timestamp.timestamp(),
-                    is_sitting: c.is_sitting,
-                    condition: c.condition,
-                    condition_level: c_level,
-                    message: c.message,
-                });
-            }
-        }
+        conditions_response.push(GetIsuConditionResponse {
+            jia_isu_uuid: c.jia_isu_uuid,
+            isu_name: isu_name.to_owned(),
+            timestamp: c.timestamp.timestamp(),
+            is_sitting: c.is_sitting,
+            condition: c.condition.clone(),
+            condition_level: calculate_condition_level(&c.condition).unwrap(),
+            message: c.message,
+        });
     }
 
     Ok(conditions_response)
@@ -1327,17 +1345,18 @@ async fn post_isu_condition(
         return Err(actix_web::error::ErrorNotFound("not found: isu"));
     }
 
-    let mut query_builder:QueryBuilder<sqlx::MySql> = QueryBuilder::new("INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)");
+    let mut query_builder:QueryBuilder<sqlx::MySql> = QueryBuilder::new("INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `level`)");
     query_builder.push_values(req.iter(), |mut b, cond| {
         let naive_timestamp = NaiveDateTime::from_timestamp(cond.timestamp, 0);
         let timestamp: DateTime<chrono::FixedOffset> =
             DateTime::from_utc(naive_timestamp, JST_OFFSET.fix());
-
+        let level = calculate_condition_level(&cond.condition).unwrap();
         b.push_bind(jia_isu_uuid.as_ref())
             .push_bind(timestamp.naive_local())
             .push_bind(&cond.is_sitting)
             .push_bind(&cond.condition)
-            .push_bind(&cond.message);
+            .push_bind(&cond.message)
+            .push_bind(level);
     });
 
     query_builder
