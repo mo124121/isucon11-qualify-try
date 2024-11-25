@@ -1,0 +1,24 @@
+# - name: Deploy template
+#   become: true
+#   ansible.builtin.template:
+#     src: "../webapp/nginx/{{ item }}.j2"
+#     dest: "/{{ item }}"
+#     owner: root
+#     group: root
+#     mode: "0644"
+#   notify: restart_nginx
+#   with_items:
+#     - etc/nginx/sites-enabled/isupipe.conf
+
+- name: Deploy file
+  become: true
+  ansible.builtin.copy:
+    src: "../webapp/nginx/{{ item }}"
+    dest: "/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: restart_nginx
+  with_items:
+    - etc/nginx/sites-enabled/isucondition.conf

@@ -1,0 +1,6 @@
+- name: Deploy nginx config
+  hosts: nginx
+  tasks:
+    - name: Import nginx role
+      ansible.builtin.import_role:
+        name: nginx
