@@ -5,11 +5,12 @@ all:
       S2: isucon-server2
       S3: isucon-server3
       B: isucon-server4
+    internal_ips:
+      S1: 172.31.41.208
+      B: 172.31.42.248
     nginx_ip: "{{ internal_ips.S1 }}"
-    pdns_ip: "{{ internal_ips.S1 }}"
     db_ip: "{{ internal_ips.S1 }}"
     main_web_ip: "{{ internal_ips.S1 }}"
-    sub_web_ip: "{{ internal_ips.S1 }}"
     ansible_user: ubuntu
     ansible_ssh_private_key_file: ~/.ssh/wsl.pem
   children:

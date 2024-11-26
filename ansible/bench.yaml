@@ -1,0 +1,15 @@
+# - name: A record
+#   hosts: all
+#   tasks:
+#     - name: Import a record role
+#       ansible.builtin.import_role:
+#         name: bench
+#         tasks_from: arecord
+
+- name: Bench
+  hosts: benchmarker
+  tasks:
+    - name: Import bench role
+      ansible.builtin.import_role:
+        name: bench
+        tasks_from: run

@@ -1,0 +1,34 @@
+- name: Generate consistent log timestamp
+  set_fact:
+    log_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+- name: Generate log file name
+  set_fact:
+    log_file: "/tmp/output_{{ log_timestamp }}.log"
+
+- name: Run bench and save output to a timestamped log file
+  ansible.builtin.shell: |
+    ./bench -all-addresses {{ nginx_ip }} \
+    -target {{ nginx_ip }}:443 -tls \
+    -jia-service-url http://{{ bench_ip }}:4999 \
+      > {{ log_file }} 2>&1
+  args:
+    executable: /bin/bash
+    chdir: /home/isucon/bench/
+  vars:
+    # nginx_ip: "{{ nginx_ip }}"
+    bench_ip: "{{ internal_ips.B }}"
+
+- name: Fetch and display the last 20 lines of the log
+  ansible.builtin.shell: "tail -n 20 {{ log_file }}"
+  register: tail_output
+
+- name: Show the last 20 lines of the log
+  debug:
+    msg: "{{ tail_output.stdout }}"
+
+- name: Fetch the log file to the local machine
+  fetch:
+    src: "{{ log_file }}"
+    dest: "../logs/"
+    flat: true
