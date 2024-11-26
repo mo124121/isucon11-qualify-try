@@ -29,6 +29,7 @@ const CONDITION_LEVEL_CRITICAL: &str = "critical";
 const SCORE_CONDITION_LEVEL_INFO: i64 = 3;
 const SCORE_CONDITION_LEVEL_WARNING: i64 = 2;
 const SCORE_CONDITION_LEVEL_CRITICAL: i64 = 1;
+const BATCH_SIZE: usize = 1000;
 
 static COND_CACHE: LazyLock<Mutex<HashMap<String, Option<IsuCondition>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -1345,25 +1346,31 @@ async fn post_isu_condition(
         return Err(actix_web::error::ErrorNotFound("not found: isu"));
     }
 
-    let mut query_builder:QueryBuilder<sqlx::MySql> = QueryBuilder::new("INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `level`)");
-    query_builder.push_values(req.iter(), |mut b, cond| {
-        let naive_timestamp = NaiveDateTime::from_timestamp(cond.timestamp, 0);
-        let timestamp: DateTime<chrono::FixedOffset> =
-            DateTime::from_utc(naive_timestamp, JST_OFFSET.fix());
-        let level = calculate_condition_level(&cond.condition).unwrap();
-        b.push_bind(jia_isu_uuid.as_ref())
-            .push_bind(timestamp.naive_local())
-            .push_bind(&cond.is_sitting)
-            .push_bind(&cond.condition)
-            .push_bind(&cond.message)
-            .push_bind(level);
-    });
+    for batch in req.chunks(BATCH_SIZE) {
+        let mut query_builder: QueryBuilder<sqlx::MySql> =
+        QueryBuilder::new("INSERT INTO `isu_condition` (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`, `level`)");
 
-    query_builder
-        .build()
-        .execute(&mut *tx)
-        .await
-        .map_err(SqlxError)?;
+        query_builder.push_values(batch.iter(), |mut b, cond| {
+            let naive_timestamp = NaiveDateTime::from_timestamp(cond.timestamp, 0);
+            let timestamp: DateTime<chrono::FixedOffset> =
+                DateTime::from_utc(naive_timestamp, JST_OFFSET.fix());
+            let level = calculate_condition_level(&cond.condition).unwrap();
+
+            b.push_bind(jia_isu_uuid.as_ref())
+                .push_bind(timestamp.naive_local())
+                .push_bind(&cond.is_sitting)
+                .push_bind(&cond.condition)
+                .push_bind(&cond.message)
+                .push_bind(level);
+        });
+
+        // バッチを実行
+        query_builder
+            .build()
+            .execute(&mut *tx)
+            .await
+            .map_err(SqlxError)?;
+    }
 
     tx.commit().await.map_err(SqlxError)?;
 
