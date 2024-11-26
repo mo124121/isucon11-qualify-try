@@ -12,6 +12,8 @@ use sqlx::mysql::MySqlConnection;
 use sqlx::QueryBuilder;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 pub mod utils;
@@ -19,6 +21,7 @@ pub mod utils;
 const SESSION_NAME: &str = "isucondition_rust";
 const CONDITION_LIMIT: usize = 20;
 const FRONTEND_CONTENTS_PATH: &str = "../public";
+const ICON_PATH: &str = "../public/icons";
 const JIA_JWT_SIGNING_KEY_PATH: &str = "../ec256-public.pem";
 const DEFAULT_ICON_FILE_PATH: &str = "../NoImage.jpg";
 const DEFAULT_JIA_SERVICE_URL: &str = "http://localhost:5000";
@@ -487,7 +490,18 @@ async fn get_jia_service_url(tx: &mut sqlx::Transaction<'_, sqlx::MySql>) -> sql
         .map(|c| c.url)
         .unwrap_or_else(|| DEFAULT_JIA_SERVICE_URL.to_owned()))
 }
+fn clear_directory(dir_path: &str) -> std::io::Result<()> {
+    let path = std::path::Path::new(dir_path);
 
+    // ディレクトリが存在する場合は削除
+    if path.exists() {
+        std::fs::remove_dir_all(path)?; // ディレクトリとその中身を全て削除
+    }
+
+    // 新たにディレクトリを再作成
+    std::fs::create_dir(path)?;
+    Ok(())
+}
 // サービスを初期化
 #[actix_web::post("/initialize")]
 async fn post_initialize(
@@ -534,6 +548,23 @@ async fn post_initialize(
             .execute(pool.as_ref())
             .await
             .map_err(SqlxError)?;
+    }
+
+    //imageのファイル化
+    clear_directory(ICON_PATH).map_err(|e| {
+        log::error!("failed to clear directory of icons: {}", e);
+        e
+    })?;
+    let images: Vec<(String, Vec<u8>)> = sqlx::query_as("SELECT jia_isu_uuid FROM isu")
+        .fetch_all(pool.as_ref())
+        .await
+        .map_err(SqlxError)?;
+    for (uuid, image) in images {
+        let mut file = fs::File::create(format!("{}/{}.jpg", ICON_PATH, uuid)).await?;
+        file.write_all(&image).await.map_err(|e| {
+            log::error!("failed to create icon: {}", e);
+            e
+        })?;
     }
 
     //DBのインデックス
