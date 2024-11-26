@@ -33,6 +33,7 @@ const BATCH_SIZE: usize = 1000;
 
 static COND_CACHE: LazyLock<Mutex<HashMap<String, Option<IsuCondition>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static JIA_SERVICE_URL: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new("".to_string()));
 
 lazy_static::lazy_static! {
     static ref JIA_JWT_SIGNING_KEY_PEM: Vec<u8> = std::fs::read(JIA_JWT_SIGNING_KEY_PATH).expect("failed to read JIA JWT signing key file");
@@ -477,15 +478,29 @@ where
 }
 
 async fn get_jia_service_url(tx: &mut sqlx::Transaction<'_, sqlx::MySql>) -> sqlx::Result<String> {
+    {
+        let url = JIA_SERVICE_URL.lock().await;
+        if url.len() != 0 {
+            return Ok(url.clone());
+        }
+    }
+
     let config: Option<Config> = fetch_optional_as(
         sqlx::query_as("SELECT * FROM `isu_association_config` WHERE `name` = ?")
             .bind("jia_service_url"),
         tx,
     )
     .await?;
-    Ok(config
+    let item = config
         .map(|c| c.url)
-        .unwrap_or_else(|| DEFAULT_JIA_SERVICE_URL.to_owned()))
+        .unwrap_or_else(|| DEFAULT_JIA_SERVICE_URL.to_owned());
+
+    {
+        let mut url = JIA_SERVICE_URL.lock().await;
+        *url = item.clone();
+    }
+
+    Ok(item)
 }
 
 // サービスを初期化
@@ -552,6 +567,8 @@ async fn post_initialize(
     {
         let mut cache = COND_CACHE.lock().await;
         cache.clear();
+        let mut url = JIA_SERVICE_URL.lock().await;
+        *url = "".to_string();
     }
 
     // 測定開始
