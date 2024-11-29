@@ -1,4 +1,5 @@
 - name: Build isucondition in release mode
-  ansible.builtin.shell: 
-    cmd: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o isucondition .
-    chdir: ../webapp/go
+  ansible.builtin.shell:
+    cmd: /home/isucon/local/go/bin/go build -o isucondition .
+    chdir: /home/isucon/webapp/go
+  notify: restart_webapp

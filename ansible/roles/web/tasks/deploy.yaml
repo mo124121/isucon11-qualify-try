@@ -1,15 +1,9 @@
-- name: Copy isucondition binary
+- name: Copy isucondition files
   ansible.builtin.copy:
     src: "../webapp/{{ item }}"
     dest: "/home/isucon/webapp/{{ item }}"
-    mode: "0755"
+    mode: "0644"
     owner: isucon
     group: isucon
   with_items:
-    - go/isucondition
-  notify: restart_webapp
-
-- name: Stop isucondition.rust service
-  ansible.builtin.systemd:
-    name: isucondition.rust
-    state: stopped
+    - go/
