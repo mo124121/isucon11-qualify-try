@@ -1,4 +1,4 @@
-- name: Build isupipe in release mode
-  ansible.builtin.command: cargo build --release
-  args:
-    chdir: ../webapp/rust
+- name: Build isucondition in release mode
+  ansible.builtin.shell: 
+    cmd: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o isucondition .
+    chdir: ../webapp/go
