@@ -1,0 +1,21 @@
+---
+- name: Deploy
+  hosts: webapp
+  become: true
+  tasks:
+    - name: Import Deploy
+      ansible.builtin.import_role:
+        name: web
+        tasks_from: deploy
+
+
+- name: Build
+  hosts: webapp
+  become: true
+  become_user: isucon
+  tasks:
+    - name: Import build
+      ansible.builtin.import_role:
+        name: web
+        tasks_from: build
+

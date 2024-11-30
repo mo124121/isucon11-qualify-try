@@ -1,0 +1,15 @@
+- name: Create isucon user with full privileges
+  become: true
+  ansible.builtin.shell: |
+    mysql --execute="
+      CREATE USER IF NOT EXISTS 'isucon'@'{{ item }}' IDENTIFIED BY 'isucon';
+      GRANT ALL PRIVILEGES ON *.* TO 'isucon'@'{{ item }}' WITH GRANT OPTION;
+    "
+  args:
+    executable: /bin/bash
+  with_items:
+    - 'localhost'
+    - 'isucon-o11y'
+    # - "{{ internal_ips.S1 }}"
+    # - "{{ internal_ips.S2 }}"
+    # - "{{ internal_ips.S3 }}"
