@@ -1,5 +1,5 @@
 - name: Build isucondition in release mode
   ansible.builtin.shell:
-    cmd: /home/isucon/local/go/bin/go build -o isucondition .
+    cmd: /usr/local/go/bin/go build -o isucondition .
     chdir: /home/isucon/webapp/go
   notify: restart_webapp
