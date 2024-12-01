@@ -1,5 +1,12 @@
+- name: Get go packages
+  ansible.builtin.shell:
+    cmd: GOROOT=/usr/local/go /usr/local/go/bin/go mod tidy
+    chdir: /home/isucon/webapp/go
+  notify: restart_webapp
+
+
 - name: Build isucondition in release mode
   ansible.builtin.shell:
-    cmd: /home/isucon/local/go/bin/go build -o isucondition .
+    cmd: GOROOT=/usr/local/go /usr/local/go/bin/go build -o isucondition .
     chdir: /home/isucon/webapp/go
   notify: restart_webapp
