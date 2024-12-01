@@ -1205,7 +1205,11 @@ func calculateConditionLevel(condition string) (string, error) {
 func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) {
 	condition, ok := conditionCache.Load(uuid)
 	if ok {
-		return condition.(IsuCondition), nil
+		item := condition.(IsuCondition)
+		if item.JIAIsuUUID == "" {
+			return IsuCondition{}, sql.ErrNoRows
+		}
+		return item, nil
 	}
 	item := IsuCondition{}
 	err := db.GetContext(ctx, &item,
@@ -1213,10 +1217,10 @@ func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) 
 		uuid,
 	)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return IsuCondition{}, err
+		if errors.Is(err, sql.ErrNoRows) {
+			conditionCache.Store(uuid, IsuCondition{})
 		}
-		item = IsuCondition{}
+		return IsuCondition{}, err
 
 	}
 	conditionCache.Store(uuid, item)
@@ -1242,12 +1246,14 @@ func getTrend(c echo.Context) error {
 		character := isu.Character
 		isuLastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
 		if err != nil {
-			c.Logger().Errorf("db error: %v", err)
-			is_invalid = true
-			return false
+			if !errors.Is(err, sql.ErrNoRows) {
+				c.Logger().Errorf("db error: %v", err)
+				is_invalid = true
+				return false
+			}
 		}
 
-		if isuLastCondition.JIAIsuUUID != "" {
+		if err == nil {
 			conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
 			if err != nil {
 				c.Logger().Error(err)
