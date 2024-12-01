@@ -36,6 +36,7 @@ const (
 	sessionName                 = "isucondition_go"
 	conditionLimit              = 20
 	frontendContentsPath        = "../public"
+	iconDir                     = "../public/icon"
 	jiaJWTSigningKeyPath        = "../ec256-public.pem"
 	defaultIconFilePath         = "../NoImage.jpg"
 	defaultJIAServiceURL        = "http://localhost:5000"
@@ -405,6 +406,22 @@ func postInitialize(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	//icon関連
+	os.RemoveAll(iconDir)
+	os.MkdirAll(iconDir, 0755)
+	isuList := make([]Isu, 0)
+	if err = db.Select(&isuList, "SELECT * FROM `isu`"); err != nil {
+		c.Logger().Errorf("db error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	for _, isu := range isuList {
+		iconPath := fmt.Sprintf("%s/%s.jpg", iconDir, isu.JIAIsuUUID)
+		if err := os.WriteFile(iconPath, isu.Image, 0644); err != nil {
+			c.Logger().Errorf("file error : %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+	}
+
 	conditionCache.Clear()
 	initCache()
 
@@ -738,6 +755,12 @@ func postIsu(c echo.Context) error {
 	isu.Image = make([]byte, 0)
 	isuCache.Store(isu.JIAIsuUUID, isu)
 
+	iconPath := fmt.Sprintf("%s/%s.jpg", iconDir, isu.JIAIsuUUID)
+	if err := os.WriteFile(iconPath, image, 0644); err != nil {
+		c.Logger().Errorf("file error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
@@ -791,7 +814,6 @@ func getIsuID(c echo.Context) error {
 // GET /api/isu/:jia_isu_uuid/icon
 // ISUのアイコンを取得
 func getIsuIcon(c echo.Context) error {
-	ctx := c.Request().Context()
 
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
@@ -805,19 +827,15 @@ func getIsuIcon(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
-	var image []byte
-	err = db.GetContext(ctx, &image, "SELECT `image` FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
-		jiaUserID, jiaIsuUUID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return c.String(http.StatusNotFound, "not found: isu")
-		}
-
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+	isu, err := getIsu(jiaIsuUUID)
+	if errors.Is(err, sql.ErrNoRows) || isu.JIAUserID != jiaUserID {
+		return c.String(http.StatusNotFound, "not found: isu")
 	}
+	header := c.Response().Header()
+	header.Set(echo.HeaderContentType, "image/jpeg")
+	header.Set("X-Accel-Redirect", fmt.Sprintf("/home/isucon/webapp/public/icon/%s.jpg", jiaIsuUUID))
 
-	return c.Blob(http.StatusOK, "", image)
+	return c.NoContent(http.StatusOK)
 }
 
 // GET /api/isu/:jia_isu_uuid/graph
