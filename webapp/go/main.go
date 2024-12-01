@@ -324,6 +324,30 @@ func getJIAServiceURL(tx *sqlx.Tx) string {
 	return config.URL
 }
 
+func dbInitialize() error {
+	// sqls := []string{
+	// 	"DELETE FROM users WHERE id > 1000",
+	// 	"DELETE FROM posts WHERE id > 10000",
+	// 	"DELETE FROM comments WHERE id > 100000",
+	// 	"UPDATE users SET del_flg = 0",
+	// 	"UPDATE users SET del_flg = 1 WHERE id % 50 = 0",
+	// }
+
+	// for _, sql := range sqls {
+	// 	db.Exec(sql)
+	// }
+
+	indexsqls := []string{
+		"CREATE INDEX uuid_time_idx ON isu_condition (jia_isu_uuid, timestamp DESC);",
+	}
+	for _, sql := range indexsqls {
+		if err := isuutil.CreateIndexIfNotExists(db, sql); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // POST /initialize
 // サービスを初期化
 func postInitialize(c echo.Context) error {
@@ -348,6 +372,11 @@ func postInitialize(c echo.Context) error {
 		request.JIAServiceURL,
 	)
 	if err != nil {
+		c.Logger().Errorf("db error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	if err := dbInitialize(); err != nil {
 		c.Logger().Errorf("db error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
