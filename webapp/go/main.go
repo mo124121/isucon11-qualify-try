@@ -58,6 +58,7 @@ var (
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
 
 	conditionCache = sync.Map{}
+	isuCache       = sync.Map{}
 )
 
 type Config struct {
@@ -201,6 +202,22 @@ func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
 	return sqlx.Open("mysql", dsn)
 }
 
+func initCache() error {
+	var query string
+
+	isuCache.Clear()
+	var isuList []Isu
+	query = "SELECT `id`, `jia_isu_uuid`, `name`, `character`, `jia_user_id`, `created_at`, `updated_at` FROM `isu`"
+	if err := db.Select(&isuList, query); err != nil {
+		return err
+	}
+	for _, isu := range isuList {
+		isuCache.Store(isu.JIAIsuUUID, isu)
+	}
+
+	return nil
+}
+
 func init() {
 	sessionStore = sessions.NewCookieStore([]byte(getEnv("SESSION_KEY", "isucondition")))
 
@@ -277,6 +294,8 @@ func main() {
 		e.Logger.Fatalf("missing: POST_ISUCONDITION_TARGET_BASE_URL")
 		return
 	}
+
+	initCache()
 
 	serverPort := fmt.Sprintf(":%v", getEnv("SERVER_APP_PORT", "3000"))
 	e.Logger.Fatal(e.Start(serverPort))
@@ -387,6 +406,7 @@ func postInitialize(c echo.Context) error {
 	}
 
 	conditionCache.Clear()
+	initCache()
 
 	//測定スタート
 	go func() {
@@ -715,6 +735,9 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	isu.Image = make([]byte, 0)
+	isuCache.Store(isu.JIAIsuUUID, isu)
+
 	err = tx.Commit()
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
@@ -724,10 +747,18 @@ func postIsu(c echo.Context) error {
 	return c.JSON(http.StatusCreated, isu)
 }
 
+func getIsu(uuid string) (Isu, error) {
+	isu, ok := isuCache.Load(uuid)
+	if ok {
+		return isu.(Isu), nil
+	}
+	return Isu{}, sql.ErrNoRows
+
+}
+
 // GET /api/isu/:jia_isu_uuid
 // ISUの情報を取得
 func getIsuID(c echo.Context) error {
-	ctx := c.Request().Context()
 
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
@@ -741,9 +772,7 @@ func getIsuID(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
-	var res Isu
-	err = db.GetContext(ctx, &res, "SELECT * FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
-		jiaUserID, jiaIsuUUID)
+	res, err := getIsu(jiaIsuUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.String(http.StatusNotFound, "not found: isu")
@@ -751,6 +780,9 @@ func getIsuID(c echo.Context) error {
 
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+	if res.JIAUserID != jiaUserID {
+		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
 	return c.JSON(http.StatusOK, res)
@@ -1178,30 +1210,29 @@ func getTrend(c echo.Context) error {
 
 	res := []TrendResponse{}
 
-	isuList := []Isu{}
-	err := db.SelectContext(ctx, &isuList, "SELECT `id`,`jia_isu_uuid`, `character` FROM `isu`")
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
 	characterInfoIsuConditions := make(map[string][]*TrendCondition)
 	characterWarningIsuConditions := make(map[string][]*TrendCondition)
 	characterCriticalIsuConditions := make(map[string][]*TrendCondition)
 	characterSet := make(map[string]struct{})
 
-	for _, isu := range isuList {
+	is_invalid := false
+	isuCache.Range(func(key interface{}, value interface{}) bool {
+
+		isu := value.(Isu)
 		character := isu.Character
 		isuLastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
-			return c.NoContent(http.StatusInternalServerError)
+			is_invalid = true
+			return false
 		}
 
 		if isuLastCondition.JIAIsuUUID != "" {
 			conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
 			if err != nil {
 				c.Logger().Error(err)
-				return c.NoContent(http.StatusInternalServerError)
+				is_invalid = true
+				return false
 			}
 			trendCondition := TrendCondition{
 				ID:        isu.ID,
@@ -1217,8 +1248,12 @@ func getTrend(c echo.Context) error {
 			}
 			characterSet[character] = struct{}{}
 		}
-
+		return true
+	})
+	if is_invalid {
+		return c.NoContent(http.StatusInternalServerError)
 	}
+
 	for character := range maps.Keys(characterSet) {
 		sort.Slice(characterInfoIsuConditions[character], func(i, j int) bool {
 			return characterInfoIsuConditions[character][i].Timestamp > characterInfoIsuConditions[character][j].Timestamp
