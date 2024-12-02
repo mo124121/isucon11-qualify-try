@@ -60,11 +60,17 @@ var (
 
 	conditionCache = sync.Map{}
 	isuCache       = sync.Map{}
+	userCache      = sync.Map{}
 )
 
 type Config struct {
 	Name string `db:"name"`
 	URL  string `db:"url"`
+}
+
+type User struct {
+	JIAUserID string    `db:"jia_user_id"`
+	CreatedAt time.Time `db:"created_at"`
 }
 
 type Isu struct {
@@ -208,6 +214,7 @@ func initCache() error {
 
 	isuCache.Clear()
 	conditionCache.Clear()
+	userCache.Clear()
 
 	var isuList []Isu
 	query = "SELECT * FROM `isu`"
@@ -226,6 +233,15 @@ func initCache() error {
 		} else {
 			conditionCache.Store(isu.JIAIsuUUID, lastCondition)
 		}
+	}
+
+	var userList []User
+	query = "SELECT * FROM `user`"
+	if err := db.Select(&userList, query); err != nil {
+		return err
+	}
+	for _, user := range userList {
+		userCache.Store(user.JIAUserID, user)
 	}
 
 	return nil
@@ -326,7 +342,6 @@ func getSession(r *http.Request) (*sessions.Session, error) {
 }
 
 func getUserIDFromSession(c echo.Context) (string, int, error) {
-	ctx := c.Request().Context()
 	session, err := getSession(c.Request())
 	if err != nil {
 		return "", http.StatusInternalServerError, fmt.Errorf("failed to get session: %v", err)
@@ -337,15 +352,10 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 	}
 
 	jiaUserID := _jiaUserID.(string)
-	var count int
+	_, ok = userCache.Load(jiaUserID)
 
-	err = db.GetContext(ctx, &count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
-		jiaUserID)
-	if err != nil {
-		return "", http.StatusInternalServerError, fmt.Errorf("db error: %v", err)
-	}
-
-	if count == 0 {
+	if !ok {
+		c.Logger().Errorf("not found: user %s", jiaUserID)
 		return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
 	}
 
@@ -411,6 +421,7 @@ func postInitialize(c echo.Context) error {
 		"jia_service_url",
 		request.JIAServiceURL,
 	)
+
 	if err != nil {
 		c.Logger().Errorf("db error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -497,6 +508,7 @@ func postAuthentication(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	userCache.Store(jiaUserID, User{})
 
 	session, err := getSession(c.Request())
 	if err != nil {
