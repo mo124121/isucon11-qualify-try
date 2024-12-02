@@ -207,6 +207,8 @@ func initCache() error {
 	var query string
 
 	isuCache.Clear()
+	conditionCache.Clear()
+
 	var isuList []Isu
 	query = "SELECT * FROM `isu`"
 	if err := db.Select(&isuList, query); err != nil {
@@ -214,6 +216,16 @@ func initCache() error {
 	}
 	for _, isu := range isuList {
 		isuCache.Store(isu.JIAIsuUUID, isu)
+		var lastCondition IsuCondition
+		err := db.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+			isu.JIAIsuUUID)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		} else {
+			conditionCache.Store(isu.JIAIsuUUID, lastCondition)
+		}
 	}
 
 	return nil
@@ -296,8 +308,11 @@ func main() {
 		return
 	}
 
-	initCache()
-
+	err = initCache()
+	if err != nil {
+		e.Logger.Fatalf("failed to init cache: %v", err)
+		return
+	}
 	serverPort := fmt.Sprintf(":%v", getEnv("SERVER_APP_PORT", "3000"))
 	e.Logger.Fatal(e.Start(serverPort))
 }
@@ -422,8 +437,11 @@ func postInitialize(c echo.Context) error {
 		}
 	}
 
-	conditionCache.Clear()
-	initCache()
+	err = initCache()
+	if err != nil {
+		c.Logger().Errorf("cache error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
 
 	//測定スタート
 	go func() {
@@ -576,10 +594,14 @@ func getIsuList(c echo.Context) error {
 
 	responseList := []GetIsuListResponse{}
 	for _, isu := range isuList {
-		var lastCondition IsuCondition
 		foundLastCondition := true
+
+		var lastCondition IsuCondition
 		err = tx.GetContext(ctx, &lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
 			isu.JIAIsuUUID)
+
+		// lastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
+
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				foundLastCondition = false
@@ -855,10 +877,12 @@ func getIsuGraph(c echo.Context) error {
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	datetimeStr := c.QueryParam("datetime")
 	if datetimeStr == "" {
+		c.Logger().Errorf("missing: datetime")
 		return c.String(http.StatusBadRequest, "missing: datetime")
 	}
 	datetimeInt64, err := strconv.ParseInt(datetimeStr, 10, 64)
 	if err != nil {
+		c.Logger().Errorf("bad format: datetime: %s", datetimeStr)
 		return c.String(http.StatusBadRequest, "bad format: datetime")
 	}
 	date := time.Unix(datetimeInt64, 0).Truncate(time.Hour)
@@ -1079,16 +1103,19 @@ func getIsuConditions(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 	if jiaIsuUUID == "" {
+		c.Logger().Errorf("missing: jia_isu_uuid")
 		return c.String(http.StatusBadRequest, "missing: jia_isu_uuid")
 	}
 
 	endTimeInt64, err := strconv.ParseInt(c.QueryParam("end_time"), 10, 64)
 	if err != nil {
+		c.Logger().Errorf("bad format: end_time : %s", c.QueryParam("end_time"))
 		return c.String(http.StatusBadRequest, "bad format: end_time")
 	}
 	endTime := time.Unix(endTimeInt64, 0)
 	conditionLevelCSV := c.QueryParam("condition_level")
 	if conditionLevelCSV == "" {
+		c.Logger().Errorf("missing: condition_level")
 		return c.String(http.StatusBadRequest, "missing: condition_level")
 	}
 	conditionLevel := map[string]interface{}{}
@@ -1101,6 +1128,7 @@ func getIsuConditions(c echo.Context) error {
 	if startTimeStr != "" {
 		startTimeInt64, err := strconv.ParseInt(startTimeStr, 10, 64)
 		if err != nil {
+			c.Logger().Errorf("bad format: start_time: %s", startTimeStr)
 			return c.String(http.StatusBadRequest, "bad format: start_time")
 		}
 		startTime = time.Unix(startTimeInt64, 0)
@@ -1205,26 +1233,10 @@ func calculateConditionLevel(condition string) (string, error) {
 func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) {
 	condition, ok := conditionCache.Load(uuid)
 	if ok {
-		item := condition.(IsuCondition)
-		if item.JIAIsuUUID == "" {
-			return IsuCondition{}, sql.ErrNoRows
-		}
-		return item, nil
+		return condition.(IsuCondition), nil
 	}
-	item := IsuCondition{}
-	err := db.GetContext(ctx, &item,
-		"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1",
-		uuid,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			conditionCache.Store(uuid, IsuCondition{})
-		}
-		return IsuCondition{}, err
 
-	}
-	conditionCache.Store(uuid, item)
-	return item, nil
+	return IsuCondition{}, sql.ErrNoRows
 }
 
 // GET /api/trend
@@ -1353,8 +1365,7 @@ func postIsuCondition(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	item, ok := conditionCache.Load(jiaIsuUUID)
-	last := item.(IsuCondition)
-	if ok && timestamp.After(last.Timestamp) {
+	if ok && timestamp.After(item.(IsuCondition).Timestamp) {
 	} else {
 		conditionCache.Store(jiaIsuUUID, IsuCondition{
 			ID:         int(id),
