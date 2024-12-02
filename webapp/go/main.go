@@ -208,7 +208,7 @@ func initCache() error {
 
 	isuCache.Clear()
 	var isuList []Isu
-	query = "SELECT `id`, `jia_isu_uuid`, `name`, `character`, `jia_user_id`, `created_at`, `updated_at` FROM `isu`"
+	query = "SELECT * FROM `isu`"
 	if err := db.Select(&isuList, query); err != nil {
 		return err
 	}
@@ -752,7 +752,7 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	isu.Image = make([]byte, 0)
+	isu.Image = image
 	isuCache.Store(isu.JIAIsuUUID, isu)
 
 	iconPath := fmt.Sprintf("%s/%s.jpg", iconDir, isu.JIAIsuUUID)
