@@ -97,13 +97,14 @@ type GetIsuListResponse struct {
 }
 
 type IsuCondition struct {
-	ID         int       `db:"id"`
-	JIAIsuUUID string    `db:"jia_isu_uuid"`
-	Timestamp  time.Time `db:"timestamp"`
-	IsSitting  bool      `db:"is_sitting"`
-	Condition  string    `db:"condition"`
-	Message    string    `db:"message"`
-	CreatedAt  time.Time `db:"created_at"`
+	ID             int       `db:"id"`
+	JIAIsuUUID     string    `db:"jia_isu_uuid"`
+	Timestamp      time.Time `db:"timestamp"`
+	IsSitting      bool      `db:"is_sitting"`
+	Condition      string    `db:"condition"`
+	Message        string    `db:"message"`
+	CreatedAt      time.Time `db:"created_at"`
+	ConditionLevel string    `db:"condition_level"`
 }
 
 type MySQLConnectionEnv struct {
@@ -231,7 +232,12 @@ func initCache() error {
 				return err
 			}
 		} else {
-			conditionCache.Store(isu.JIAIsuUUID, lastCondition)
+			nextCondition, ok := conditionCache.Load(isu.JIAIsuUUID)
+			if ok && nextCondition.(IsuCondition).Timestamp.Before(lastCondition.Timestamp) {
+
+			} else {
+				conditionCache.Store(isu.JIAIsuUUID, lastCondition)
+			}
 		}
 	}
 
@@ -430,6 +436,28 @@ func postInitialize(c echo.Context) error {
 	if err := dbInitialize(); err != nil {
 		c.Logger().Errorf("db error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	//columnの追加
+	_, err = db.Exec("ALTER TABLE isu_condition ADD condition_level VARCHAR(255) DEFAULT ''")
+	if err != nil {
+		c.Logger().Errorf("db error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	var conditionList []IsuCondition
+	err = db.Select(&conditionList, "SELECT * FROM isu_condition")
+	for _, condition := range conditionList {
+		var level string
+		level, err = calculateConditionLevel(condition.Condition)
+		if err != nil {
+			c.Logger().Errorf("condition calculation error: %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		_, err = db.Exec("UPDATE isu_condition SET condition_level = ? WHERE id = ?", level, condition.ID)
+		if err != nil {
+			c.Logger().Errorf("db error : %v", err)
+			return c.NoContent(http.StatusInternalServerError)
+		}
 	}
 
 	//icon関連
@@ -786,7 +814,6 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	isu.Image = image
 	isuCache.Store(isu.JIAIsuUUID, isu)
 
 	iconPath := fmt.Sprintf("%s/%s.jpg", iconDir, isu.JIAIsuUUID)
@@ -800,6 +827,8 @@ func postIsu(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	time.Sleep(time.Millisecond * 500)
 
 	return c.JSON(http.StatusCreated, isu)
 }
@@ -1160,7 +1189,7 @@ func getIsuConditions(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	conditionsResponse, err := getIsuConditionsFromDB(db, jiaIsuUUID, endTime, conditionLevel, startTime, conditionLimit, isuName)
+	conditionsResponse, err := getIsuConditionsFromDB(db, jiaIsuUUID, endTime, conditionLevelCSV, startTime, conditionLimit, isuName)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1169,7 +1198,7 @@ func getIsuConditions(c echo.Context) error {
 }
 
 // ISUのコンディションをDBから取得
-func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, conditionLevel map[string]interface{}, startTime time.Time,
+func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, conditionLevelCSV string, startTime time.Time,
 	limit int, isuName string) ([]*GetIsuConditionResponse, error) {
 
 	conditions := []IsuCondition{}
@@ -1177,18 +1206,18 @@ func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, c
 
 	if startTime.IsZero() {
 		err = db.Select(&conditions,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ?"+
+			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND ? like CONCAT('%', `condition_level`, '%')"+
 				"	AND `timestamp` < ?"+
-				"	ORDER BY `timestamp` DESC",
-			jiaIsuUUID, endTime,
+				"	ORDER BY `timestamp` DESC LIMIT ?",
+			jiaIsuUUID, conditionLevelCSV, endTime, limit,
 		)
 	} else {
 		err = db.Select(&conditions,
-			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ?"+
+			"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? AND ? like CONCAT('%', `condition_level`, '%')"+
 				"	AND `timestamp` < ?"+
 				"	AND ? <= `timestamp`"+
-				"	ORDER BY `timestamp` DESC",
-			jiaIsuUUID, endTime, startTime,
+				"	ORDER BY `timestamp` DESC LIMIT ?",
+			jiaIsuUUID, conditionLevelCSV, endTime, startTime, limit,
 		)
 	}
 	if err != nil {
@@ -1197,27 +1226,17 @@ func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, c
 
 	conditionsResponse := []*GetIsuConditionResponse{}
 	for _, c := range conditions {
-		cLevel, err := calculateConditionLevel(c.Condition)
-		if err != nil {
-			continue
+		data := GetIsuConditionResponse{
+			JIAIsuUUID:     c.JIAIsuUUID,
+			IsuName:        isuName,
+			Timestamp:      c.Timestamp.Unix(),
+			IsSitting:      c.IsSitting,
+			Condition:      c.Condition,
+			ConditionLevel: c.ConditionLevel,
+			Message:        c.Message,
 		}
+		conditionsResponse = append(conditionsResponse, &data)
 
-		if _, ok := conditionLevel[cLevel]; ok {
-			data := GetIsuConditionResponse{
-				JIAIsuUUID:     c.JIAIsuUUID,
-				IsuName:        isuName,
-				Timestamp:      c.Timestamp.Unix(),
-				IsSitting:      c.IsSitting,
-				Condition:      c.Condition,
-				ConditionLevel: cLevel,
-				Message:        c.Message,
-			}
-			conditionsResponse = append(conditionsResponse, &data)
-		}
-	}
-
-	if len(conditionsResponse) > limit {
-		conditionsResponse = conditionsResponse[:limit]
 	}
 
 	return conditionsResponse, nil
@@ -1361,11 +1380,16 @@ func postIsuCondition(c echo.Context) error {
 	}
 
 	created_at := time.Now()
+	level, err := calculateConditionLevel(cond.Condition)
+	if err != nil {
+		c.Logger().Errorf("condition calculation error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
 	result, err := db.ExecContext(ctx,
 		"INSERT INTO `isu_condition`"+
-			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`,`created_at`)"+
+			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`,`condition_level`, `message`,`created_at`)"+
 			"	VALUES (?, ?, ?, ?, ?, ?)",
-		jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message, created_at)
+		jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, level, cond.Message, created_at)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1380,13 +1404,14 @@ func postIsuCondition(c echo.Context) error {
 	if ok && timestamp.After(item.(IsuCondition).Timestamp) {
 	} else {
 		conditionCache.Store(jiaIsuUUID, IsuCondition{
-			ID:         int(id),
-			JIAIsuUUID: jiaIsuUUID,
-			Timestamp:  timestamp,
-			IsSitting:  cond.IsSitting,
-			Condition:  cond.Condition,
-			Message:    cond.Message,
-			CreatedAt:  created_at,
+			ID:             int(id),
+			JIAIsuUUID:     jiaIsuUUID,
+			Timestamp:      timestamp,
+			IsSitting:      cond.IsSitting,
+			Condition:      cond.Condition,
+			ConditionLevel: level,
+			Message:        cond.Message,
+			CreatedAt:      created_at,
 		})
 	}
 
