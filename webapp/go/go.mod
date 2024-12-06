@@ -4,6 +4,7 @@ go 1.23.3
 
 require (
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
+	github.com/go-json-experiment/json v0.0.0-20241127185351-9802db03f36a
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/gorilla/sessions v1.2.1
 	github.com/jmoiron/sqlx v1.3.4

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-json-experiment/json"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/isucon/isucon11-qualify/isucondition/isuutil"
@@ -266,6 +266,17 @@ func init() {
 	}
 }
 
+type v2JSONSerializer struct {
+}
+
+func (s *v2JSONSerializer) Serialize(c echo.Context, i interface{}, indent string) error {
+	return json.MarshalWrite(c.Response(), i)
+}
+
+func (s *v2JSONSerializer) Deserialize(c echo.Context, i interface{}) error {
+	return json.UnmarshalRead(c.Request().Body, i)
+}
+
 func main() {
 	e := echo.New()
 	e.Debug = true
@@ -279,6 +290,7 @@ func main() {
 		panic(err)
 	}
 	e.Use(otelecho.Middleware("webapp"))
+	e.JSONSerializer = &v2JSONSerializer{}
 
 	e.POST("/initialize", postInitialize)
 
