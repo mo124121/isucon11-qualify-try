@@ -1279,6 +1279,23 @@ func calculateConditionLevel(ctx context.Context, condition string) (string, err
 
 	return conditionLevel, nil
 }
+func calculateConditionLevelInternal(condition string) (string, error) {
+	var conditionLevel string
+
+	warnCount := strings.Count(condition, "=true")
+	switch warnCount {
+	case 0:
+		conditionLevel = conditionLevelInfo
+	case 1, 2:
+		conditionLevel = conditionLevelWarning
+	case 3:
+		conditionLevel = conditionLevelCritical
+	default:
+		return "", fmt.Errorf("unexpected warn count")
+	}
+
+	return conditionLevel, nil
+}
 
 func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) {
 	pc := make([]uintptr, 1)
@@ -1302,13 +1319,44 @@ func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) 
 	conditionCache.Store(uuid, lastCondition)
 	return lastCondition, nil
 }
+func getLatestConditionInternal(uuid string) (IsuCondition, error) {
+	condition, ok := conditionCache.Load(uuid)
+	if ok {
+		return condition.(IsuCondition), nil
+	}
 
-// GET /api/trend
-// ISUの性格毎の最新のコンディション情報
-func getTrend(c echo.Context) error {
-	ctx := c.Request().Context()
+	var lastCondition IsuCondition
+	err := db.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+		uuid)
 
-	res := []TrendResponse{}
+	if err != nil {
+		return IsuCondition{}, sql.ErrNoRows
+	}
+	conditionCache.Store(uuid, lastCondition)
+	return lastCondition, nil
+}
+
+type Group struct {
+	mu sync.Mutex
+	m  map[int64][]TrendResponse
+}
+
+var g = Group{}
+
+func calcTrend() ([]TrendResponse, error) {
+	key := time.Now().Unix()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.m == nil {
+		g.m = make(map[int64][]TrendResponse)
+	}
+
+	if item, ok := g.m[key]; ok {
+		return item, nil
+	}
+
+	fmt.Printf("calcTrend key: %d\n", key)
+	res := make([]TrendResponse, 0)
 
 	characterInfoIsuConditions := make(map[string][]*TrendCondition)
 	characterWarningIsuConditions := make(map[string][]*TrendCondition)
@@ -1320,19 +1368,17 @@ func getTrend(c echo.Context) error {
 
 		isu := value.(Isu)
 		character := isu.Character
-		isuLastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
+		isuLastCondition, err := getLatestConditionInternal(isu.JIAIsuUUID)
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
-				c.Logger().Errorf("db error: %v", err)
 				is_invalid = true
 				return false
 			}
 		}
 
 		if err == nil {
-			conditionLevel, err := calculateConditionLevel(ctx, isuLastCondition.Condition)
+			conditionLevel, err := calculateConditionLevelInternal(isuLastCondition.Condition)
 			if err != nil {
-				c.Logger().Error(err)
 				is_invalid = true
 				return false
 			}
@@ -1353,7 +1399,7 @@ func getTrend(c echo.Context) error {
 		return true
 	})
 	if is_invalid {
-		return c.NoContent(http.StatusInternalServerError)
+		return make([]TrendResponse, 0), nil
 	}
 
 	for character := range maps.Keys(characterSet) {
@@ -1373,6 +1419,18 @@ func getTrend(c echo.Context) error {
 				Warning:   characterWarningIsuConditions[character],
 				Critical:  characterCriticalIsuConditions[character],
 			})
+	}
+	g.m[key] = res
+	return res, nil
+}
+
+// GET /api/trend
+// ISUの性格毎の最新のコンディション情報
+func getTrend(c echo.Context) error {
+
+	res, err := calcTrend()
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
 	}
 	return c.JSON(http.StatusOK, res)
 }
