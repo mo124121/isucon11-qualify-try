@@ -753,27 +753,13 @@ func postIsu(c echo.Context) error {
 			return c.NoContent(http.StatusInternalServerError)
 		}
 	}
-	tx, err := db.BeginTxx(ctx, nil)
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, "INSERT INTO `isu`"+
-		"	(`jia_isu_uuid`, `name`, `image`, `jia_user_id`) VALUES (?, ?, ?, ?)",
-		jiaIsuUUID, isuName, image, jiaUserID)
-	if err != nil {
-		mysqlErr, ok := err.(*mysql.MySQLError)
-
-		if ok && mysqlErr.Number == uint16(mysqlErrNumDuplicateEntry) {
-			return c.String(http.StatusConflict, "duplicated: isu")
-		}
-
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+	_, err = getIsu(jiaIsuUUID)
+	if err == nil {
+		return c.String(http.StatusConflict, "duplicated: isu")
 	}
 
+	//isuのjiaへの登録
 	targetURL := getJIAServiceURL() + "/api/activate"
 	body := JIAServiceRequest{postIsuConditionTargetBaseURL, jiaIsuUUID}
 	bodyJSON, err := json.Marshal(body)
@@ -814,33 +800,37 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE `isu` SET `character` = ? WHERE  `jia_isu_uuid` = ?", isuFromJIA.Character, jiaIsuUUID)
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+	timestamp := time.Now()
+	isu := Isu{
+		ID:         0,
+		JIAIsuUUID: jiaIsuUUID,
+		Name:       isuName,
+		Image:      make([]byte, 0),
+		JIAUserID:  jiaUserID,
+		Character:  isuFromJIA.Character,
+		CreatedAt:  timestamp,
+		UpdatedAt:  timestamp,
 	}
+	query := "INSERT INTO `isu` (`jia_isu_uuid`, `name`, `image`, `character`, `jia_user_id`, `created_at`, `updated_at`)" +
+		"VALUES (:jia_isu_uuid, :name, :image, :character, :jia_user_id, :created_at, :updated_at)"
+	result, err := db.NamedExecContext(ctx, query, isu)
 
-	var isu Isu
-	err = tx.GetContext(ctx,
-		&isu,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
-		jiaUserID, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		c.Logger().Errorf("db error: %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	isu.ID = int(id)
 
 	isuCache.Store(isu.JIAIsuUUID, isu)
 
 	iconPath := fmt.Sprintf("%s/%s.jpg", iconDir, isu.JIAIsuUUID)
 	if err := os.WriteFile(iconPath, image, 0644); err != nil {
 		c.Logger().Errorf("file error : %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
