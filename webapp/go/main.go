@@ -1423,6 +1423,49 @@ func getTrend(c echo.Context) error {
 	return c.JSON(http.StatusOK, res)
 }
 
+type ConditionStack struct {
+	mu   sync.Mutex
+	data []IsuCondition
+}
+
+var conditionStack ConditionStack
+
+const CONDITON_STACK_MAXSIZE = 10
+
+func insertConditions(ctx context.Context, condition IsuCondition) error {
+	conditionStack.mu.Lock()
+	defer conditionStack.mu.Unlock()
+	//lazy initialize
+	if conditionStack.data == nil {
+		conditionStack.data = make([]IsuCondition, CONDITON_STACK_MAXSIZE)
+	}
+	conditionStack.data = append(conditionStack.data, condition)
+
+	//遅延更新の総量が一定以下ならスキップ
+	if len(conditionStack.data) < CONDITON_STACK_MAXSIZE {
+		return nil
+	}
+
+	query := "INSERT INTO `isu_condition`" +
+		"(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`,`condition_level`, `message`,`created_at`) VALUES" +
+		"(:jia_isu_uuid, :timestamp, :is_sitting, :condition, :condition_level, :message, :created_at)"
+
+	_, err := db.NamedExecContext(ctx, query, conditionStack.data)
+	if err != nil {
+		fmt.Println(query)
+		fmt.Println(err)
+	}
+
+	//エラーによらずスタック・キャッシュは削除
+	for _, item := range conditionStack.data {
+		conditionCache.Delete(item.JIAIsuUUID)
+	}
+	conditionStack.data = make([]IsuCondition, CONDITON_STACK_MAXSIZE)
+
+	return err
+
+}
+
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
@@ -1460,20 +1503,18 @@ func postIsuCondition(c echo.Context) error {
 
 	created_at := time.Now()
 	level, err := calculateConditionLevel(ctx, cond.Condition)
-	if err != nil {
-		c.Logger().Errorf("condition calculation error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
+	condition := IsuCondition{
+		ID:             0,
+		JIAIsuUUID:     jiaIsuUUID,
+		Timestamp:      timestamp,
+		IsSitting:      cond.IsSitting,
+		Condition:      cond.Condition,
+		ConditionLevel: level,
+		Message:        cond.Message,
+		CreatedAt:      created_at,
 	}
-	_, err = db.ExecContext(ctx,
-		"INSERT INTO `isu_condition`"+
-			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`,`condition_level`, `message`,`created_at`)"+
-			"	VALUES (?, ?, ?, ?, ?, ?, ?)",
-		jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, level, cond.Message, created_at)
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	conditionCache.Delete(jiaIsuUUID)
+
+	go insertConditions(ctx, condition)
 
 	return c.NoContent(http.StatusAccepted)
 }
