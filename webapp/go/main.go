@@ -61,6 +61,7 @@ var (
 	conditionCache = sync.Map{}
 	isuCache       = sync.Map{}
 	userCache      = sync.Map{}
+	JIAServiceURL  = ""
 )
 
 type Config struct {
@@ -213,9 +214,20 @@ func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
 func initCache() error {
 	var query string
 
+	JIAServiceURL = ""
 	isuCache.Clear()
 	conditionCache.Clear()
 	userCache.Clear()
+
+	var config Config
+	err := db.Get(&config, "SELECT * FROM `isu_association_config` WHERE `name` = ?", "jia_service_url")
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Print(err)
+		}
+		JIAServiceURL = defaultJIAServiceURL
+	}
+	JIAServiceURL = config.URL
 
 	var isuList []Isu
 	query = "SELECT * FROM `isu`"
@@ -380,16 +392,8 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 	return jiaUserID, 0, nil
 }
 
-func getJIAServiceURL(tx *sqlx.Tx) string {
-	var config Config
-	err := tx.Get(&config, "SELECT * FROM `isu_association_config` WHERE `name` = ?", "jia_service_url")
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Print(err)
-		}
-		return defaultJIAServiceURL
-	}
-	return config.URL
+func getJIAServiceURL() string {
+	return JIAServiceURL
 }
 
 func dbInitialize() error {
@@ -770,7 +774,7 @@ func postIsu(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	targetURL := getJIAServiceURL(tx) + "/api/activate"
+	targetURL := getJIAServiceURL() + "/api/activate"
 	body := JIAServiceRequest{postIsuConditionTargetBaseURL, jiaIsuUUID}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
