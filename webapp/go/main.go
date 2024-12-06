@@ -608,11 +608,11 @@ func getIsuList(c echo.Context) error {
 	for _, isu := range isuList {
 		foundLastCondition := true
 
-		var lastCondition IsuCondition
-		err = tx.GetContext(ctx, &lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
-			isu.JIAIsuUUID)
+		// var lastCondition IsuCondition
+		// err = tx.GetContext(ctx, &lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+		// 	isu.JIAIsuUUID)
 
-		// lastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
+		lastCondition, err := getLatestCondition(ctx, isu.JIAIsuUUID)
 
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -1330,7 +1330,7 @@ func getTrend(c echo.Context) error {
 func postIsuCondition(c echo.Context) error {
 	ctx := c.Request().Context()
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
-	dropProbability := 0.8
+	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
 		// c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
@@ -1377,7 +1377,7 @@ func postIsuCondition(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 	item, ok := conditionCache.Load(jiaIsuUUID)
-	if ok && timestamp.After(item.(IsuCondition).Timestamp) {
+	if ok && timestamp.Before(item.(IsuCondition).Timestamp) {
 	} else {
 		conditionCache.Store(jiaIsuUUID, IsuCondition{
 			ID:         int(id),
