@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho"
+	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -423,6 +425,7 @@ func dbInitialize() error {
 // POST /initialize
 // サービスを初期化
 func postInitialize(c echo.Context) error {
+	ctx := c.Request().Context()
 	var request InitializeRequest
 	err := c.Bind(&request)
 	if err != nil {
@@ -464,7 +467,7 @@ func postInitialize(c echo.Context) error {
 	err = db.Select(&conditionList, "SELECT * FROM isu_condition")
 	for _, condition := range conditionList {
 		var level string
-		level, err = calculateConditionLevel(condition.Condition)
+		level, err = calculateConditionLevel(ctx, condition.Condition)
 		if err != nil {
 			c.Logger().Errorf("condition calculation error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
@@ -669,7 +672,7 @@ func getIsuList(c echo.Context) error {
 
 		var formattedCondition *GetIsuConditionResponse
 		if foundLastCondition {
-			conditionLevel, err := calculateConditionLevel(lastCondition.Condition)
+			conditionLevel, err := calculateConditionLevel(ctx, lastCondition.Condition)
 			if err != nil {
 				c.Logger().Error(err)
 				return c.NoContent(http.StatusInternalServerError)
@@ -754,7 +757,7 @@ func postIsu(c echo.Context) error {
 		}
 	}
 
-	_, err = getIsu(jiaIsuUUID)
+	_, err = getIsu(ctx, jiaIsuUUID)
 	if err == nil {
 		return c.String(http.StatusConflict, "duplicated: isu")
 	}
@@ -839,7 +842,12 @@ func postIsu(c echo.Context) error {
 	return c.JSON(http.StatusCreated, isu)
 }
 
-func getIsu(uuid string) (Isu, error) {
+func getIsu(ctx context.Context, uuid string) (Isu, error) {
+	pc := make([]uintptr, 1)
+	runtime.Callers(0, pc)
+	function := runtime.FuncForPC(pc[0])
+	ctx, span := otel.GetTracerProvider().Tracer("").Start(ctx, function.Name())
+	defer span.End()
 	isu, ok := isuCache.Load(uuid)
 	if ok {
 		return isu.(Isu), nil
@@ -851,7 +859,7 @@ func getIsu(uuid string) (Isu, error) {
 // GET /api/isu/:jia_isu_uuid
 // ISUの情報を取得
 func getIsuID(c echo.Context) error {
-
+	ctx := c.Request().Context()
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
 		if errStatusCode == http.StatusUnauthorized {
@@ -864,7 +872,7 @@ func getIsuID(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
-	res, err := getIsu(jiaIsuUUID)
+	res, err := getIsu(ctx, jiaIsuUUID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.String(http.StatusNotFound, "not found: isu")
@@ -883,7 +891,7 @@ func getIsuID(c echo.Context) error {
 // GET /api/isu/:jia_isu_uuid/icon
 // ISUのアイコンを取得
 func getIsuIcon(c echo.Context) error {
-
+	ctx := c.Request().Context()
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
 		if errStatusCode == http.StatusUnauthorized {
@@ -896,7 +904,7 @@ func getIsuIcon(c echo.Context) error {
 
 	jiaIsuUUID := c.Param("jia_isu_uuid")
 
-	isu, err := getIsu(jiaIsuUUID)
+	isu, err := getIsu(ctx, jiaIsuUUID)
 	if errors.Is(err, sql.ErrNoRows) || isu.JIAUserID != jiaUserID {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
@@ -1249,7 +1257,12 @@ func getIsuConditionsFromDB(db *sqlx.DB, jiaIsuUUID string, endTime time.Time, c
 }
 
 // ISUのコンディションの文字列からコンディションレベルを計算
-func calculateConditionLevel(condition string) (string, error) {
+func calculateConditionLevel(ctx context.Context, condition string) (string, error) {
+	pc := make([]uintptr, 1)
+	runtime.Callers(0, pc)
+	function := runtime.FuncForPC(pc[0])
+	ctx, span := otel.GetTracerProvider().Tracer("").Start(ctx, function.Name())
+	defer span.End()
 	var conditionLevel string
 
 	warnCount := strings.Count(condition, "=true")
@@ -1268,6 +1281,11 @@ func calculateConditionLevel(condition string) (string, error) {
 }
 
 func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) {
+	pc := make([]uintptr, 1)
+	runtime.Callers(0, pc)
+	function := runtime.FuncForPC(pc[0])
+	ctx, span := otel.GetTracerProvider().Tracer("").Start(ctx, function.Name())
+	defer span.End()
 	condition, ok := conditionCache.Load(uuid)
 	if ok {
 		return condition.(IsuCondition), nil
@@ -1303,7 +1321,7 @@ func getTrend(c echo.Context) error {
 		}
 
 		if err == nil {
-			conditionLevel, err := calculateConditionLevel(isuLastCondition.Condition)
+			conditionLevel, err := calculateConditionLevel(ctx, isuLastCondition.Condition)
 			if err != nil {
 				c.Logger().Error(err)
 				is_invalid = true
@@ -1374,7 +1392,7 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	_, err = getIsu(jiaIsuUUID)
+	_, err = getIsu(ctx, jiaIsuUUID)
 	if err != nil {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
@@ -1386,7 +1404,7 @@ func postIsuCondition(c echo.Context) error {
 	}
 
 	created_at := time.Now()
-	level, err := calculateConditionLevel(cond.Condition)
+	level, err := calculateConditionLevel(ctx, cond.Condition)
 	if err != nil {
 		c.Logger().Errorf("condition calculation error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
