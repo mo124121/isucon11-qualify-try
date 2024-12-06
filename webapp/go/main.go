@@ -1286,12 +1286,21 @@ func getLatestCondition(ctx context.Context, uuid string) (IsuCondition, error) 
 	function := runtime.FuncForPC(pc[0])
 	ctx, span := otel.GetTracerProvider().Tracer("").Start(ctx, function.Name())
 	defer span.End()
+
 	condition, ok := conditionCache.Load(uuid)
 	if ok {
 		return condition.(IsuCondition), nil
 	}
 
-	return IsuCondition{}, sql.ErrNoRows
+	var lastCondition IsuCondition
+	err := db.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
+		uuid)
+
+	if err != nil {
+		return IsuCondition{}, sql.ErrNoRows
+	}
+	conditionCache.Store(uuid, lastCondition)
+	return lastCondition, nil
 }
 
 // GET /api/trend
@@ -1409,7 +1418,7 @@ func postIsuCondition(c echo.Context) error {
 		c.Logger().Errorf("condition calculation error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-	result, err := db.ExecContext(ctx,
+	_, err = db.ExecContext(ctx,
 		"INSERT INTO `isu_condition`"+
 			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`,`condition_level`, `message`,`created_at`)"+
 			"	VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1418,26 +1427,7 @@ func postIsuCondition(c echo.Context) error {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	item, ok := conditionCache.Load(jiaIsuUUID)
-	if ok && timestamp.Before(item.(IsuCondition).Timestamp) {
-	} else {
-		conditionCache.Store(jiaIsuUUID, IsuCondition{
-			ID:             int(id),
-			JIAIsuUUID:     jiaIsuUUID,
-			Timestamp:      timestamp,
-			IsSitting:      cond.IsSitting,
-			Condition:      cond.Condition,
-			ConditionLevel: level,
-			Message:        cond.Message,
-			CreatedAt:      created_at,
-		})
-	}
+	conditionCache.Delete(jiaIsuUUID)
 
 	return c.NoContent(http.StatusAccepted)
 }
